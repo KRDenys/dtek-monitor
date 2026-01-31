@@ -17,6 +17,9 @@ import {
   saveLastMessage,
 } from "./helpers.js"
 
+// =====================
+// Отримання інформації
+// =====================
 async function getInfo() {
   console.log("🌀 Getting info...")
 
@@ -67,6 +70,9 @@ async function getInfo() {
   }
 }
 
+// =====================
+// Перевірки
+// =====================
 function checkIsOutage(info) {
   console.log("🌀 Checking power outage...")
 
@@ -92,52 +98,64 @@ function checkIsScheduled(info) {
     throw Error("❌ Power outage info missed.")
   }
 
-  const { sub_type } = info?.data?.[HOUSE] || {}
+  const { sub_type = "" } = info?.data?.[HOUSE] || {}
+  const lower = sub_type.toLowerCase()
+
   const isScheduled =
-    !sub_type.toLowerCase().includes("авар") &&
-    !sub_type.toLowerCase().includes("екст")
+    !lower.includes("авар") && !lower.includes("екст")
 
   isScheduled
     ? console.log("🗓️ Power outage scheduled!")
-    : console.log("⚠️ Power outage not scheduled!")
+    : console.log("⚠️ Power outage NOT scheduled!")
 
   return isScheduled
 }
 
-function generateMessage(info) {
+// =====================
+// Генерація повідомлення
+// =====================
+function generateMessage(info, isScheduled) {
   console.log("🌀 Generating message...")
 
   const { sub_type, start_date, end_date } = info?.data?.[HOUSE] || {}
   const { updateTimestamp } = info || {}
 
-  const reason = capitalize(sub_type)
-  const begin = start_date.split(" ")[0]
-  const end = end_date.split(" ")[0]
+  const reason = capitalize(sub_type || "Невідома причина")
+  const begin = start_date?.split(" ")[0] || "—"
+  const end = end_date?.split(" ")[0] || "—"
+
+  const statusLine = isScheduled
+    ? "🗓️ <b>Планове відключення</b>"
+    : "🚨 <b>Аварійне відключення</b>"
 
   return [
     "⚡️ <b>Зафіксовано відключення:</b>",
+    statusLine,
     `🪫 <code>${begin} — ${end}</code>`,
     "",
     `⚠️ <i>${reason}.</i>`,
     "\n",
-    `🔄 <i>${updateTimestamp}</i>`,
+    `🔄 <i>${updateTimestamp || "—"}</i>`,
     `💬 <i>${getCurrentTime()}</i>`,
   ].join("\n")
 }
 
+// =====================
+// Відправка в Telegram
+// =====================
 async function sendNotification(message) {
   if (!TELEGRAM_BOT_TOKEN)
-    throw Error("❌ Missing telegram bot token or chat id.")
-  if (!TELEGRAM_CHAT_ID) throw Error("❌ Missing telegram chat id.")
+    throw Error("❌ Missing telegram bot token.")
+  if (!TELEGRAM_CHAT_ID)
+    throw Error("❌ Missing telegram chat id.")
 
   console.log("🌀 Sending notification...")
 
   const lastMessage = loadLastMessage() || {}
-  try {
+
+  const send = async (method) => {
     const response = await fetch(
-      `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${
-        lastMessage.message_id ? "editMessageText" : "sendMessage"
-      }`,
+      `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${method}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -150,27 +168,50 @@ async function sendNotification(message) {
       }
     )
 
-    const data = await response.json()
-    saveLastMessage(data.result)
+    return await response.json()
+  }
 
-    console.log("🟢 Notification sent.")
+  try {
+    let data
+
+    if (lastMessage.message_id) {
+      console.log("✏️ Trying to update last message...")
+      data = await send("editMessageText")
+
+      if (!data.ok) {
+        console.log("↩️ Update failed, sending new message...")
+        deleteLastMessage()
+        data = await send("sendMessage")
+      }
+    } else {
+      data = await send("sendMessage")
+    }
+
+    if (data.ok && data.result) {
+      saveLastMessage(data.result)
+      console.log("🟢 Notification sent.")
+    } else {
+      throw new Error(JSON.stringify(data))
+    }
   } catch (error) {
     console.log("🔴 Notification not sent.", error.message)
     deleteLastMessage()
   }
 }
 
+// =====================
+// Головний запуск
+// =====================
 async function run() {
   const info = await getInfo()
-  const isOutage = checkIsOutage(info)
 
+  const isOutage = checkIsOutage(info)
   if (!isOutage) return
 
   const isScheduled = checkIsScheduled(info)
-  if (isOutage && !isScheduled) {
-    const message = generateMessage(info)
-    await sendNotification(message)
-  }
+
+  const message = generateMessage(info, isScheduled)
+  await sendNotification(message)
 }
 
 run().catch((error) => console.error(error.message))
